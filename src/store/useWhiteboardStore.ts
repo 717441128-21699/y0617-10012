@@ -43,6 +43,7 @@ interface WhiteboardState {
 
   addOperation: (op: Operation) => void;
   setOperations: (ops: Operation[]) => void;
+  setUndoRedoStacks: (undoStack: Operation[], redoStack: Operation[]) => void;
   undo: () => Operation | null;
   redo: () => Operation | null;
   addToUndoStack: (op: Operation) => void;
@@ -92,6 +93,9 @@ export const useWhiteboardStore = create<WhiteboardState>((set, get) => ({
 
   addUser: (user) =>
     set((state) => {
+      if (state.currentUser?.id === user.id) {
+        return {};
+      }
       const newUsers = new Map(state.users);
       newUsers.set(user.id, user);
       return { users: newUsers };
@@ -107,9 +111,13 @@ export const useWhiteboardStore = create<WhiteboardState>((set, get) => ({
     }),
 
   setUsers: (users) =>
-    set(() => {
+    set((state) => {
       const newUsers = new Map<string, User>();
-      users.forEach((user) => newUsers.set(user.id, user));
+      users.forEach((user) => {
+        if (state.currentUser?.id !== user.id) {
+          newUsers.set(user.id, user);
+        }
+      });
       return { users: newUsers };
     }),
 
@@ -206,6 +214,9 @@ export const useWhiteboardStore = create<WhiteboardState>((set, get) => ({
     })),
 
   setOperations: (ops) => set({ operations: ops }),
+
+  setUndoRedoStacks: (undoStack, redoStack) =>
+    set({ undoStack, redoStack }),
 
   undo: () => {
     const state = get();

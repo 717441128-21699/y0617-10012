@@ -83,9 +83,14 @@ export function setupWebSocket(server: Server): void {
     ws.on('close', () => {
       if (ws.userId) {
         const userId = ws.userId;
-        store.removeUser(userId);
-        broadcast(wss, 'user-leave', { userId });
-        console.log(`User ${userId} disconnected`);
+        const wasLastConnection = store.removeUser(userId);
+        if (wasLastConnection) {
+          broadcast(wss, 'user-leave', { userId });
+          console.log(`User ${userId} disconnected (last connection)`);
+        } else {
+          console.log(`User ${userId} connection closed (still has other connections)`);
+        }
+        broadcast(wss, 'users', { users: store.getUsers() });
       }
     });
   });
@@ -108,9 +113,18 @@ function handleMessage(ws: ExtendedWebSocket, message: WSMessage, wss: WebSocket
 }
 
 function handleInit(ws: ExtendedWebSocket, payload: InitMessage, wss: WebSocketServer): void {
-  const userId = payload.userId || uuidv4();
-  const color = getNextColor();
-  const name = payload.userName || getNextName();
+  let userId = payload.userId || uuidv4();
+  let color: string;
+  let name: string;
+
+  const existingUser = store.getUser(userId);
+  if (existingUser) {
+    color = existingUser.color;
+    name = existingUser.name;
+  } else {
+    color = getNextColor();
+    name = payload.userName || getNextName();
+  }
 
   const user: User = {
     id: userId,
@@ -119,7 +133,7 @@ function handleInit(ws: ExtendedWebSocket, payload: InitMessage, wss: WebSocketS
   };
 
   ws.userId = userId;
-  store.addUser(user);
+  const isNewUser = store.addUser(user);
 
   sendMessage(ws, 'history', {
     operations: store.getOperations(),
@@ -127,10 +141,12 @@ function handleInit(ws: ExtendedWebSocket, payload: InitMessage, wss: WebSocketS
     currentUser: user,
   });
 
-  broadcast(wss, 'user-join', { user }, userId);
+  if (isNewUser) {
+    broadcast(wss, 'user-join', { user }, userId);
+  }
   broadcast(wss, 'users', { users: store.getUsers() });
 
-  console.log(`User ${userId} (${name}) joined`);
+  console.log(`User ${userId} (${name}) initialized, new: ${isNewUser}`);
 }
 
 function handleOperation(ws: ExtendedWebSocket, payload: OperationMessage, wss: WebSocketServer): void {
@@ -150,7 +166,7 @@ function handleOperation(ws: ExtendedWebSocket, payload: OperationMessage, wss: 
   if (ws.userId) {
     const user = store.getUser(ws.userId);
     if (user) {
-      console.log(`User ${user.name} ${operation.type} operation: ${operation.tool}`);
+      console.log(`User ${user.name} ${operation.type} operation: ${operation.tool}, lamport: ${operation.lamport}`);
     }
   }
 }

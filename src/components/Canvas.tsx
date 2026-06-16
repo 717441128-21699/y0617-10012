@@ -37,12 +37,9 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     cancelDrawing,
     setViewOffset,
     setViewScale,
-    addOperation,
-    addToUndoStack,
     showTextInputAt,
     hideTextInput,
     setCurrentText,
-    setOperations,
   } = useWhiteboardStore();
 
   const { sendOperation, sendCursor, sendUndo, sendRedo } = useWebSocket();
@@ -51,11 +48,9 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     (clientX: number, clientY: number): Point => {
       const canvas = canvasRef.current;
       if (!canvas) return { x: 0, y: 0 };
-
       const rect = canvas.getBoundingClientRect();
       const x = (clientX - rect.left - viewOffset.x * viewScale) / viewScale;
       const y = (clientY - rect.top - viewOffset.y * viewScale) / viewScale;
-
       return { x, y };
     },
     [viewOffset, viewScale]
@@ -65,9 +60,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     const canvas = canvasRef.current;
     const tools = drawingToolsRef.current;
     if (!canvas || !tools) return;
-
     tools.redrawAll(operations, canvas.width, canvas.height, viewOffset, viewScale);
-
     if (isDrawing && currentPoints.length > 0) {
       tools.drawPreview(
         currentTool,
@@ -85,23 +78,19 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
-
     const resizeCanvas = () => {
       const rect = container.getBoundingClientRect();
       canvas.width = rect.width;
       canvas.height = rect.height;
       redraw();
     };
-
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
-
     const ctx = canvas.getContext('2d');
     if (ctx) {
       drawingToolsRef.current = new DrawingTools(ctx);
       redraw();
     }
-
     return () => {
       window.removeEventListener('resize', resizeCanvas);
     };
@@ -117,22 +106,17 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
         hideTextInput();
         return;
       }
-
       if (e.button === 1 || (e.button === 0 && e.altKey)) {
         isPanningRef.current = true;
         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
         return;
       }
-
       if (e.button !== 0) return;
-
       const point = getCanvasPoint(e.clientX, e.clientY);
-
       if (currentTool === 'text') {
         showTextInputAt(point);
         return;
       }
-
       startDrawing(point);
     },
     [currentTool, getCanvasPoint, showTextInput, hideTextInput, startDrawing, showTextInputAt]
@@ -146,7 +130,6 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
         sendCursor(point);
         lastCursorSendRef.current = now;
       }
-
       if (isPanningRef.current && lastPanPointRef.current) {
         const dx = e.clientX - lastPanPointRef.current.x;
         const dy = e.clientY - lastPanPointRef.current.y;
@@ -157,9 +140,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
         lastPanPointRef.current = { x: e.clientX, y: e.clientY };
         return;
       }
-
       if (!isDrawing) return;
-
       const point = getCanvasPoint(e.clientX, e.clientY);
       updateDrawing(point);
     },
@@ -172,9 +153,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
       lastPanPointRef.current = null;
       return;
     }
-
     if (!isDrawing) return;
-
     const op = endDrawing();
     if (op && currentUser) {
       const operation: Operation = {
@@ -184,11 +163,8 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
         lamport: 0,
       };
       sendOperation(operation);
-      addOperation(operation);
-      addToUndoStack(operation);
-      setOperations([...operations, operation]);
     }
-  }, [isDrawing, endDrawing, sendOperation, addOperation, addToUndoStack, currentUser, operations, setOperations]);
+  }, [isDrawing, endDrawing, sendOperation, currentUser]);
 
   const handleMouseLeave = useCallback(() => {
     if (isPanningRef.current) {
@@ -205,22 +181,17 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
       e.preventDefault();
       const delta = e.deltaY > 0 ? 0.9 : 1.1;
       const newScale = Math.max(0.1, Math.min(5, viewScale * delta));
-
       const canvas = canvasRef.current;
       if (canvas) {
         const rect = canvas.getBoundingClientRect();
         const mouseX = e.clientX - rect.left;
         const mouseY = e.clientY - rect.top;
-
         const oldScale = viewScale;
-        const scaleRatio = newScale / oldScale;
-
         setViewOffset({
           x: viewOffset.x - (mouseX / newScale - mouseX / oldScale),
           y: viewOffset.y - (mouseY / newScale - mouseY / oldScale),
         });
       }
-
       setViewScale(newScale);
     },
     [viewScale, viewOffset, setViewScale, setViewOffset]
@@ -231,7 +202,6 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
       hideTextInput();
       return;
     }
-
     const operation: Operation = {
       id: uuidv4(),
       userId: currentUser.id,
@@ -244,13 +214,9 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
       lineWidth: currentLineWidth,
       timestamp: Date.now(),
     };
-
     sendOperation(operation);
-    addOperation(operation);
-    addToUndoStack(operation);
-    setOperations([...operations, operation]);
     hideTextInput();
-  }, [currentText, textInputPosition, currentUser, currentColor, currentLineWidth, sendOperation, addOperation, addToUndoStack, hideTextInput, operations, setOperations]);
+  }, [currentText, textInputPosition, currentUser, currentColor, currentLineWidth, sendOperation, hideTextInput]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -280,7 +246,6 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
         }
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [sendUndo, sendRedo]);
@@ -292,6 +257,14 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     : currentTool === 'eraser'
     ? 'cell'
     : 'crosshair';
+
+  const textStyle: React.CSSProperties = {};
+  if (showTextInput && textInputPosition) {
+    textStyle.left = textInputPosition.x * viewScale + viewOffset.x * viewScale;
+    textStyle.top = textInputPosition.y * viewScale + viewOffset.y * viewScale;
+    textStyle.color = currentColor;
+    textStyle.fontSize = 16 * viewScale;
+  }
 
   return (
     <div ref={containerRef} className={`relative w-full h-full overflow-hidden bg-white ${className || ''}`}>
@@ -305,7 +278,6 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
         onMouseLeave={handleMouseLeave}
         onWheel={handleWheel}
       />
-
       {showTextInput && textInputPosition && (
         <input
           type="text"
@@ -316,13 +288,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
           autoFocus
           placeholder="输入文字..."
           className="absolute z-10 bg-transparent border-2 border-blue-500 rounded px-1 py-0.5 outline-none min-w-[100px]"
-          style={{
-            left: textInputPosition.x * viewScale + viewOffset.x * viewScale,
-            top: textInputPosition.y * viewScale + viewOffset.y * viewScale,
-            color: currentColor,
-            fontSize: `${16 * viewScale}px`,
-            transform: 'translate(0, 0)',
-          }}
+          style={textStyle}
         />
       )}
     </div>

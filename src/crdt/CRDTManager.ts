@@ -1,15 +1,17 @@
 import type { Operation, Point } from '../../shared/types';
 
-export class CRDTManager {
-  private operations: Map<string, Operation> = new Map();
-  private operationOrder: string[] = [];
-  private localLamport: number = 0;
-  private undoStack: Operation[] = [];
-  private redoStack: Operation[] = [];
-  private onOperationApplied: ((op: Operation) => void) | null = null;
+export interface OperationState {
+  op: Operation;
+  undone: boolean;
+}
 
-  setOnOperationApplied(callback: (op: Operation) => void): void {
-    this.onOperationApplied = callback;
+export class CRDTManager {
+  private operations: Map<string, OperationState> = new Map();
+  private localLamport: number = 0;
+  private onOperationsChanged: (() => void) | null = null;
+
+  setOnOperationsChanged(callback: () => void): void {
+    this.onOperationsChanged = callback;
   }
 
   getLocalLamport(): number {
@@ -36,94 +38,91 @@ export class CRDTManager {
 
     this.receiveLamport(op.lamport);
 
-    this.operations.set(op.id, op);
-
     if (op.type === 'undo' && op.undoOf) {
-      const index = this.operationOrder.indexOf(op.undoOf);
-      if (index !== -1) {
-        this.operationOrder.splice(index, 0, op.id);
-      } else {
-        this.operationOrder.push(op.id);
+      const targetState = this.operations.get(op.undoOf);
+      if (targetState) {
+        targetState.undone = true;
       }
     } else if (op.type === 'redo' && op.undoOf) {
-      const undoIndex = this.operationOrder.findIndex(id => {
-        const o = this.operations.get(id);
-        return o && o.type === 'undo' && o.undoOf === op.undoOf;
-      });
-      if (undoIndex !== -1) {
-        this.operationOrder.splice(undoIndex + 1, 0, op.id);
-      } else {
-        this.operationOrder.push(op.id);
+      const targetState = this.operations.get(op.undoOf);
+      if (targetState) {
+        targetState.undone = false;
       }
-    } else {
-      this.operationOrder.push(op.id);
     }
 
-    if (this.onOperationApplied) {
-      this.onOperationApplied(op);
+    this.operations.set(op.id, {
+      op,
+      undone: false,
+    });
+
+    if (this.onOperationsChanged) {
+      this.onOperationsChanged();
     }
 
     return true;
   }
 
   getOperations(): Operation[] {
-    return this.operationOrder
-      .map(id => this.operations.get(id)!)
-      .filter(op => !this.isUndone(op.id))
-      .sort((a, b) => a.lamport - b.lamport);
+    return Array.from(this.operations.values())
+      .filter((state) => state.op.type === 'draw' && !state.undone)
+      .map((state) => state.op)
+      .sort((a, b) => {
+        if (a.lamport !== b.lamport) {
+          return a.lamport - b.lamport;
+        }
+        if (a.timestamp !== b.timestamp) {
+          return a.timestamp - b.timestamp;
+        }
+        return a.id.localeCompare(b.id);
+      });
   }
 
-  private isUndone(opId: string): boolean {
-    const undoOp = Array.from(this.operations.values()).find(
-      op => op.type === 'undo' && op.undoOf === opId
-    );
-    if (!undoOp) return false;
+  isOperationUndone(opId: string): boolean {
+    const state = this.operations.get(opId);
+    return state?.undone ?? false;
+  }
 
-    const redoOp = Array.from(this.operations.values()).find(
-      op => op.type === 'redo' && op.undoOf === opId
-    );
-    if (redoOp && redoOp.lamport > undoOp.lamport) return false;
+  getMyUndoRedoStacks(userId: string): { undoStack: Operation[]; redoStack: Operation[] } {
+    const myDrawOps: Operation[] = [];
 
-    return true;
+    this.operations.forEach((state) => {
+      if (state.op.type === 'draw' && state.op.userId === userId) {
+        myDrawOps.push(state.op);
+      }
+    });
+
+    myDrawOps.sort((a, b) => {
+      if (a.lamport !== b.lamport) return a.lamport - b.lamport;
+      return a.timestamp - b.timestamp;
+    });
+
+    const undoStack: Operation[] = [];
+    const redoStack: Operation[] = [];
+
+    for (const drawOp of myDrawOps) {
+      if (this.isOperationUndone(drawOp.id)) {
+        redoStack.push(drawOp);
+      } else {
+        undoStack.push(drawOp);
+      }
+    }
+
+    return { undoStack, redoStack };
   }
 
   addLocalOperation(op: Operation): void {
     this.incrementLamport();
     op.lamport = this.localLamport;
     this.applyOperation(op);
-
-    if (op.type === 'draw') {
-      this.undoStack.push(op);
-      this.redoStack = [];
-    }
-  }
-
-  canUndo(): boolean {
-    return this.undoStack.length > 0;
-  }
-
-  canRedo(): boolean {
-    return this.redoStack.length > 0;
-  }
-
-  getUndoStack(): Operation[] {
-    return [...this.undoStack];
-  }
-
-  getRedoStack(): Operation[] {
-    return [...this.redoStack];
   }
 
   clear(): void {
     this.operations.clear();
-    this.operationOrder = [];
-    this.undoStack = [];
-    this.redoStack = [];
     this.localLamport = 0;
   }
 
   getOperationById(id: string): Operation | undefined {
-    return this.operations.get(id);
+    return this.operations.get(id)?.op;
   }
 }
 

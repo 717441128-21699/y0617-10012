@@ -15,27 +15,26 @@ import type {
   UsersMessage,
 } from '../../shared/types';
 
-const isDev = import.meta.env.DEV;
-const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-const WS_URL = isDev
-  ? 'ws://localhost:3001/ws'
-  : `${WS_PROTOCOL}//${window.location.host}/ws`;
+function getWebSocketUrl(): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.host;
+  return `${protocol}//${host}/ws`;
+}
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isManualCloseRef = useRef(false);
+  const currentUserRef = useRef<User | null>(null);
 
-  const {
-    setCurrentUser,
-    addUser,
-    removeUser,
-    setUsers,
-    updateRemoteCursor,
-    setIsConnected,
-    setOperations,
-    addToUndoStack,
-  } = useWhiteboardStore();
+  const setCurrentUser = useWhiteboardStore((state) => state.setCurrentUser);
+  const addUser = useWhiteboardStore((state) => state.addUser);
+  const removeUser = useWhiteboardStore((state) => state.removeUser);
+  const setUsers = useWhiteboardStore((state) => state.setUsers);
+  const updateRemoteCursor = useWhiteboardStore((state) => state.updateRemoteCursor);
+  const setIsConnected = useWhiteboardStore((state) => state.setIsConnected);
+  const setOperations = useWhiteboardStore((state) => state.setOperations);
+  const setUndoRedoStacks = useWhiteboardStore((state) => state.setUndoRedoStacks);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -45,11 +44,12 @@ export function useWebSocket() {
     isManualCloseRef.current = false;
 
     try {
-      const ws = new WebSocket(WS_URL);
+      const wsUrl = getWebSocketUrl();
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
+        console.log('WebSocket connected to', wsUrl);
         setIsConnected(true);
 
         const storedUserId = localStorage.getItem('whiteboard_user_id');
@@ -86,8 +86,6 @@ export function useWebSocket() {
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        console.error('WebSocket readyState:', ws.readyState);
-        console.error('WebSocket URL:', WS_URL);
       };
     } catch (error) {
       console.error('Error creating WebSocket:', error);
@@ -116,6 +114,14 @@ export function useWebSocket() {
       connect();
     }, 3000);
   }, [connect]);
+
+  const refreshOperationsFromCRDT = useCallback(() => {
+    setOperations(crdtManager.getOperations());
+    if (currentUserRef.current) {
+      const { undoStack, redoStack } = crdtManager.getMyUndoRedoStacks(currentUserRef.current.id);
+      setUndoRedoStacks(undoStack, redoStack);
+    }
+  }, [setOperations, setUndoRedoStacks]);
 
   const handleMessage = useCallback(
     (message: WSMessage) => {
@@ -162,24 +168,22 @@ export function useWebSocket() {
       localStorage.setItem('whiteboard_user_id', currentUser.id);
       localStorage.setItem('whiteboard_user_name', currentUser.name);
 
+      currentUserRef.current = currentUser;
       setCurrentUser(currentUser);
-      setUsers(users.filter((u) => u.id !== currentUser.id));
+
+      const otherUsers = users.filter((u) => u.id !== currentUser.id);
+      setUsers(otherUsers);
 
       crdtManager.clear();
       operations.forEach((op) => {
         crdtManager.applyOperation(op);
       });
 
-      setOperations(crdtManager.getOperations());
+      refreshOperationsFromCRDT();
 
-      const myOperations = operations.filter(
-        (op) => op.userId === currentUser.id && op.type === 'draw'
-      );
-      myOperations.forEach((op) => addToUndoStack(op));
-
-      console.log(`Loaded ${operations.length} operations from history`);
+      console.log(`Loaded ${operations.length} operations from history for user ${currentUser.name}`);
     },
-    [setCurrentUser, setUsers, setOperations, addToUndoStack]
+    [setCurrentUser, setUsers, refreshOperationsFromCRDT]
   );
 
   const handleOperation = useCallback(
@@ -192,20 +196,18 @@ export function useWebSocket() {
 
       const applied = crdtManager.applyOperation(operation);
       if (applied) {
-        setOperations(crdtManager.getOperations());
-
-        const currentUser = useWhiteboardStore.getState().currentUser;
-        if (currentUser && operation.userId === currentUser.id && operation.type === 'draw') {
-          addToUndoStack(operation);
-        }
+        refreshOperationsFromCRDT();
       }
     },
-    [setOperations, addToUndoStack]
+    [refreshOperationsFromCRDT]
   );
 
   const handleCursor = useCallback(
     (payload: CursorMessage) => {
       const { userId, position } = payload;
+      if (currentUserRef.current && userId === currentUserRef.current.id) {
+        return;
+      }
       updateRemoteCursor(userId, position);
     },
     [updateRemoteCursor]
@@ -214,6 +216,9 @@ export function useWebSocket() {
   const handleUserJoin = useCallback(
     (payload: UserJoinMessage) => {
       const { user } = payload;
+      if (currentUserRef.current && user.id === currentUserRef.current.id) {
+        return;
+      }
       addUser(user);
       console.log(`User joined: ${user.name}`);
     },
@@ -232,8 +237,9 @@ export function useWebSocket() {
   const handleUsers = useCallback(
     (payload: UsersMessage) => {
       const { users } = payload;
-      const currentUser = useWhiteboardStore.getState().currentUser;
-      const otherUsers = currentUser ? users.filter((u) => u.id !== currentUser.id) : users;
+      const otherUsers = currentUserRef.current
+        ? users.filter((u) => u.id !== currentUserRef.current.id)
+        : users;
       setUsers(otherUsers);
     },
     [setUsers]
@@ -250,17 +256,17 @@ export function useWebSocket() {
           payload: { operation },
         })
       );
+      refreshOperationsFromCRDT();
     }
-  }, []);
+  }, [refreshOperationsFromCRDT]);
 
   const sendCursor = useCallback((position: Point) => {
-    const currentUser = useWhiteboardStore.getState().currentUser;
-    if (currentUser && wsRef.current?.readyState === WebSocket.OPEN) {
+    if (currentUserRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: 'cursor',
           payload: {
-            userId: currentUser.id,
+            userId: currentUserRef.current.id,
             position,
           },
         })
@@ -269,12 +275,11 @@ export function useWebSocket() {
   }, []);
 
   const sendUndo = useCallback((undoOf: string) => {
-    const currentUser = useWhiteboardStore.getState().currentUser;
-    if (!currentUser) return;
+    if (!currentUserRef.current) return;
 
     const undoOp: Operation = {
       id: uuidv4(),
-      userId: currentUser.id,
+      userId: currentUserRef.current.id,
       lamport: crdtManager.getLocalLamport() + 1,
       type: 'undo',
       tool: 'pencil',
@@ -295,16 +300,15 @@ export function useWebSocket() {
       );
     }
 
-    setOperations(crdtManager.getOperations());
-  }, [setOperations]);
+    refreshOperationsFromCRDT();
+  }, [refreshOperationsFromCRDT]);
 
   const sendRedo = useCallback((redoOf: string) => {
-    const currentUser = useWhiteboardStore.getState().currentUser;
-    if (!currentUser) return;
+    if (!currentUserRef.current) return;
 
     const redoOp: Operation = {
       id: uuidv4(),
-      userId: currentUser.id,
+      userId: currentUserRef.current.id,
       lamport: crdtManager.getLocalLamport() + 1,
       type: 'redo',
       tool: 'pencil',
@@ -325,8 +329,8 @@ export function useWebSocket() {
       );
     }
 
-    setOperations(crdtManager.getOperations());
-  }, [setOperations]);
+    refreshOperationsFromCRDT();
+  }, [refreshOperationsFromCRDT]);
 
   useEffect(() => {
     connect();
@@ -336,6 +340,8 @@ export function useWebSocket() {
     };
   }, [connect, disconnect]);
 
+  const isConnected = useWhiteboardStore((state) => state.isConnected);
+
   return {
     connect,
     disconnect,
@@ -343,6 +349,6 @@ export function useWebSocket() {
     sendCursor,
     sendUndo,
     sendRedo,
-    isConnected: useWhiteboardStore((state) => state.isConnected),
+    isConnected,
   };
 }
