@@ -45,17 +45,15 @@ export const Toolbar: React.FC = () => {
   const { sendUndo, sendRedo, isConnected } = useWebSocket();
 
   const handleUndo = () => {
-    if (undoStack.length > 0) {
-      const undoOp = undoStack[undoStack.length - 1];
-      sendUndo(undoOp.id);
-    }
+    if (!isConnected || undoStack.length === 0) return;
+    const undoOp = undoStack[undoStack.length - 1];
+    sendUndo(undoOp.id);
   };
 
   const handleRedo = () => {
-    if (redoStack.length > 0) {
-      const redoOp = redoStack[redoStack.length - 1];
-      sendRedo(redoOp.id);
-    }
+    if (!isConnected || redoStack.length === 0) return;
+    const redoOp = redoStack[redoStack.length - 1];
+    sendRedo(redoOp.id);
   };
 
   const handleZoomIn = () => {
@@ -167,9 +165,9 @@ export const Toolbar: React.FC = () => {
 
           <button
             onClick={handleUndo}
-            disabled={undoStack.length === 0}
+            disabled={!isConnected || undoStack.length === 0}
             className={`p-2 rounded-lg transition-all duration-200 ${
-              undoStack.length > 0
+              isConnected && undoStack.length > 0
                 ? 'hover:bg-gray-100 text-gray-700'
                 : 'text-gray-300 cursor-not-allowed'
             }`}
@@ -179,9 +177,9 @@ export const Toolbar: React.FC = () => {
           </button>
           <button
             onClick={handleRedo}
-            disabled={redoStack.length === 0}
+            disabled={!isConnected || redoStack.length === 0}
             className={`p-2 rounded-lg transition-all duration-200 ${
-              redoStack.length > 0
+              isConnected && redoStack.length > 0
                 ? 'hover:bg-gray-100 text-gray-700'
                 : 'text-gray-300 cursor-not-allowed'
             }`}

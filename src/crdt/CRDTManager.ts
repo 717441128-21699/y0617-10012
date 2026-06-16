@@ -1,19 +1,13 @@
-import type { Operation, Point } from '../../shared/types';
+import type { Operation } from '../../shared/types';
 
 export interface OperationState {
   op: Operation;
   undone: boolean;
-  confirmed: boolean;
 }
 
 export class CRDTManager {
   private operations: Map<string, OperationState> = new Map();
   private localLamport: number = 0;
-  private onOperationsChanged: (() => void) | null = null;
-
-  setOnOperationsChanged(callback: () => void): void {
-    this.onOperationsChanged = callback;
-  }
 
   getLocalLamport(): number {
     return this.localLamport;
@@ -27,16 +21,11 @@ export class CRDTManager {
     return this.operations.has(id);
   }
 
-  applyOperation(op: Operation, confirmed: boolean = false): boolean {
+  applyOperation(op: Operation): boolean {
     const existing = this.operations.get(op.id);
 
     if (existing) {
       let changed = false;
-
-      if (confirmed && !existing.confirmed) {
-        existing.confirmed = true;
-        changed = true;
-      }
 
       if (op.lamport > existing.op.lamport) {
         existing.op = { ...existing.op, lamport: op.lamport };
@@ -56,10 +45,6 @@ export class CRDTManager {
           targetState.undone = false;
           changed = true;
         }
-      }
-
-      if (changed && this.onOperationsChanged) {
-        this.onOperationsChanged();
       }
 
       return changed;
@@ -82,17 +67,16 @@ export class CRDTManager {
     this.operations.set(op.id, {
       op,
       undone: false,
-      confirmed,
     });
 
     if (op.type === 'draw') {
       this.operations.forEach((state) => {
-        if (state.op.type === 'undo' && state.op.undoOf === op.id && !op.undoOf) {
+        if (state.op.type === 'undo' && state.op.undoOf === op.id) {
           const targetState = this.operations.get(op.id);
           if (targetState && !targetState.undone) {
             targetState.undone = true;
           }
-        } else if (state.op.type === 'redo' && state.op.undoOf === op.id && !op.undoOf) {
+        } else if (state.op.type === 'redo' && state.op.undoOf === op.id) {
           const targetState = this.operations.get(op.id);
           if (targetState && targetState.undone) {
             targetState.undone = false;
@@ -101,15 +85,7 @@ export class CRDTManager {
       });
     }
 
-    if (this.onOperationsChanged) {
-      this.onOperationsChanged();
-    }
-
     return true;
-  }
-
-  confirmOperation(op: Operation): boolean {
-    return this.applyOperation(op, true);
   }
 
   getOperations(): Operation[] {
@@ -155,12 +131,6 @@ export class CRDTManager {
     }
 
     return { undoStack, redoStack };
-  }
-
-  addLocalOperation(op: Operation): void {
-    this.localLamport++;
-    op.lamport = this.localLamport;
-    this.applyOperation(op, false);
   }
 
   clear(): void {

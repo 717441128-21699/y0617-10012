@@ -8,6 +8,7 @@ export interface Point {
 export interface Operation {
   id: string;
   userId: string;
+  sessionId: string;
   lamport: number;
   type: 'draw' | 'undo' | 'redo';
   tool: ToolType;
@@ -54,6 +55,7 @@ export interface InitMessage {
 export interface HistoryMessage {
   operations: Operation[];
   users: User[];
+  sessionId: string;
 }
 
 export interface OperationMessage {
@@ -62,6 +64,7 @@ export interface OperationMessage {
 
 export interface CursorMessage {
   userId: string;
+  sessionId: string;
   position: Point;
 }
 

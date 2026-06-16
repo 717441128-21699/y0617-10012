@@ -13,6 +13,7 @@ import type {
 
 interface ExtendedWebSocket extends WebSocket {
   userId?: string;
+  sessionId?: string;
 }
 
 const USER_COLORS = [
@@ -56,10 +57,9 @@ function sendMessage(ws: WebSocket, type: string, payload: unknown): void {
   }
 }
 
-function broadcast(wss: WebSocketServer, type: string, payload: unknown, excludeUserId?: string): void {
+function broadcastAll(wss: WebSocketServer, type: string, payload: unknown): void {
   wss.clients.forEach((client) => {
-    const extClient = client as ExtendedWebSocket;
-    if (client.readyState === WebSocket.OPEN && extClient.userId !== excludeUserId) {
+    if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({ type, payload }));
     }
   });
@@ -85,12 +85,12 @@ export function setupWebSocket(server: Server): void {
         const userId = ws.userId;
         const wasLastConnection = store.removeUser(userId);
         if (wasLastConnection) {
-          broadcast(wss, 'user-leave', { userId });
+          broadcastAll(wss, 'user-leave', { userId });
           console.log(`User ${userId} disconnected (last connection)`);
         } else {
           console.log(`User ${userId} connection closed (still has other connections)`);
         }
-        broadcast(wss, 'users', { users: store.getUsers() });
+        broadcastAll(wss, 'users', { users: store.getUsers() });
       }
     });
   });
@@ -129,6 +129,8 @@ function handleInit(ws: ExtendedWebSocket, payload: InitMessage, wss: WebSocketS
     name = payload.userName || getNextName();
   }
 
+  const sessionId = uuidv4();
+
   const user: User = {
     id: userId,
     name,
@@ -136,20 +138,22 @@ function handleInit(ws: ExtendedWebSocket, payload: InitMessage, wss: WebSocketS
   };
 
   ws.userId = userId;
+  ws.sessionId = sessionId;
   const isNewUser = store.addUser(user);
 
   sendMessage(ws, 'history', {
     operations: store.getOperations(),
     users: store.getUsers(),
     currentUser: user,
+    sessionId,
   });
 
   if (isNewUser) {
-    broadcast(wss, 'user-join', { user }, userId);
+    broadcastAll(wss, 'user-join', { user });
   }
-  broadcast(wss, 'users', { users: store.getUsers() });
+  broadcastAll(wss, 'users', { users: store.getUsers() });
 
-  console.log(`User ${userId} (${name}) initialized, new: ${isNewUser}`);
+  console.log(`User ${userId} (${name}) initialized, session: ${sessionId.slice(0, 8)}, new: ${isNewUser}`);
 }
 
 function handleOperation(ws: ExtendedWebSocket, payload: OperationMessage, wss: WebSocketServer): void {
@@ -159,12 +163,16 @@ function handleOperation(ws: ExtendedWebSocket, payload: OperationMessage, wss: 
     return;
   }
 
+  if (ws.sessionId) {
+    operation.sessionId = ws.sessionId;
+  }
+
   const serverLamport = store.getMaxLamport();
   operation.lamport = Math.max(operation.lamport, serverLamport + 1);
 
   store.addOperation(operation);
 
-  broadcast(wss, 'operation', { operation });
+  broadcastAll(wss, 'operation', { operation });
 
   if (ws.userId) {
     const user = store.getUser(ws.userId);
@@ -181,5 +189,13 @@ function handleCursor(ws: ExtendedWebSocket, payload: CursorMessage, wss: WebSoc
 
   store.updateUserCursor(userId, position);
 
-  broadcast(wss, 'cursor', { userId, position }, userId);
+  wss.clients.forEach((client) => {
+    const extClient = client as ExtendedWebSocket;
+    if (client.readyState === WebSocket.OPEN && extClient.sessionId !== ws.sessionId) {
+      client.send(JSON.stringify({
+        type: 'cursor',
+        payload: { userId, sessionId: ws.sessionId, position },
+      }));
+    }
+  });
 }

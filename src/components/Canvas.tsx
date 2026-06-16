@@ -31,6 +31,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     textInputPosition,
     currentText,
     currentUser,
+    isConnected,
     startDrawing,
     updateDrawing,
     endDrawing,
@@ -102,6 +103,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!isConnected) return;
       if (showTextInput) {
         hideTextInput();
         return;
@@ -119,7 +121,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
       }
       startDrawing(point);
     },
-    [currentTool, getCanvasPoint, showTextInput, hideTextInput, startDrawing, showTextInputAt]
+    [currentTool, getCanvasPoint, showTextInput, hideTextInput, startDrawing, showTextInputAt, isConnected]
   );
 
   const handleMouseMove = useCallback(
@@ -160,6 +162,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
         ...op,
         id: uuidv4(),
         userId: currentUser.id,
+        sessionId: '',
         lamport: 0,
       };
       sendOperation(operation);
@@ -205,6 +208,7 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     const operation: Operation = {
       id: uuidv4(),
       userId: currentUser.id,
+      sessionId: '',
       lamport: 0,
       type: 'draw',
       tool: 'text',
@@ -233,14 +237,14 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
+        const state = useWhiteboardStore.getState();
+        if (!state.isConnected) return;
         if (e.shiftKey) {
-          const state = useWhiteboardStore.getState();
           if (state.redoStack.length > 0) {
             const redoOp = state.redoStack[state.redoStack.length - 1];
             sendRedo(redoOp.id);
           }
         } else {
-          const state = useWhiteboardStore.getState();
           if (state.undoStack.length > 0) {
             const undoOp = state.undoStack[state.undoStack.length - 1];
             sendUndo(undoOp.id);
@@ -252,7 +256,9 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [sendUndo, sendRedo]);
 
-  const cursorStyle = isPanningRef.current
+  const cursorStyle = !isConnected
+    ? 'not-allowed'
+    : isPanningRef.current
     ? 'grabbing'
     : currentTool === 'text'
     ? 'text'
@@ -280,6 +286,13 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
         onMouseLeave={handleMouseLeave}
         onWheel={handleWheel}
       />
+      {!isConnected && (
+        <div className="absolute inset-0 bg-black/5 z-5 flex items-center justify-center pointer-events-none">
+          <div className="bg-white/90 rounded-lg px-4 py-2 shadow-md text-gray-600 text-sm">
+            连接断开，正在重连...
+          </div>
+        </div>
+      )}
       {showTextInput && textInputPosition && (
         <input
           type="text"

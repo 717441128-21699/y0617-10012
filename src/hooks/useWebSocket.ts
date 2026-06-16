@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { useWhiteboardStore } from '../store/useWhiteboardStore';
 import { crdtManager } from '../crdt/CRDTManager';
@@ -26,11 +26,13 @@ class WebSocketManager {
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private isManualClose = false;
   private currentUser: User | null = null;
+  private sessionId: string = '';
   private isConnected = false;
   private isConnecting = false;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lastHeartbeatResponse = 0;
+  private pendingQueue: Operation[] = [];
 
   init(): void {
     if (this.isConnected || this.isConnecting) {
@@ -166,6 +168,23 @@ class WebSocketManager {
     }, 3000);
   }
 
+  private flushPendingQueue(): void {
+    if (this.pendingQueue.length === 0) return;
+    const queue = [...this.pendingQueue];
+    this.pendingQueue = [];
+    for (const op of queue) {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(
+          JSON.stringify({
+            type: 'operation',
+            payload: { operation: op },
+          })
+        );
+      }
+    }
+    console.log(`Flushed ${queue.length} pending operations`);
+  }
+
   private refreshOperationsFromCRDT(): void {
     const ops = crdtManager.getOperations();
     useWhiteboardStore.getState().setOperations(ops);
@@ -178,7 +197,7 @@ class WebSocketManager {
   private handleMessage(message: WSMessage): void {
     switch (message.type) {
       case 'history': {
-        const payload = message.payload as HistoryMessage & { currentUser: User };
+        const payload = message.payload as HistoryMessage & { currentUser: User; sessionId: string };
         this.handleHistory(payload);
         break;
       }
@@ -210,13 +229,14 @@ class WebSocketManager {
     }
   }
 
-  private handleHistory(payload: HistoryMessage & { currentUser: User }): void {
-    const { operations, users, currentUser } = payload;
+  private handleHistory(payload: HistoryMessage & { currentUser: User; sessionId: string }): void {
+    const { operations, users, currentUser, sessionId } = payload;
 
     localStorage.setItem('whiteboard_user_id', currentUser.id);
     localStorage.setItem('whiteboard_user_name', currentUser.name);
 
     this.currentUser = currentUser;
+    this.sessionId = sessionId;
     useWhiteboardStore.getState().setCurrentUser(currentUser);
 
     const otherUsers = users.filter((u) => u.id !== currentUser.id);
@@ -224,29 +244,26 @@ class WebSocketManager {
 
     crdtManager.clear();
     operations.forEach((op) => {
-      crdtManager.applyOperation(op, true);
+      crdtManager.applyOperation(op);
     });
 
     this.refreshOperationsFromCRDT();
+    this.flushPendingQueue();
 
-    console.log(`Loaded ${operations.length} operations from history for user ${currentUser.name}`);
+    console.log(`Loaded ${operations.length} operations, session: ${sessionId.slice(0, 8)}`);
   }
 
   private handleOperation(payload: OperationMessage): void {
     const { operation } = payload;
-    const isMyOp = this.currentUser && operation.userId === this.currentUser.id;
-    const changed = crdtManager.confirmOperation(operation);
+    const changed = crdtManager.applyOperation(operation);
     if (changed) {
       this.refreshOperationsFromCRDT();
-      if (isMyOp) {
-        console.log(`Server confirmed my operation ${operation.id}, lamport: ${operation.lamport}`);
-      }
     }
   }
 
   private handleCursor(payload: CursorMessage): void {
-    const { userId, position } = payload;
-    if (this.currentUser && userId === this.currentUser.id) {
+    const { userId, sessionId: senderSessionId, position } = payload;
+    if (senderSessionId === this.sessionId) {
       return;
     }
     useWhiteboardStore.getState().updateRemoteCursor(userId, position);
@@ -258,14 +275,12 @@ class WebSocketManager {
       return;
     }
     useWhiteboardStore.getState().addUser(user);
-    console.log(`User joined: ${user.name}`);
   }
 
   private handleUserLeave(payload: UserLeaveMessage): void {
     const { userId } = payload;
     useWhiteboardStore.getState().removeUser(userId);
     useWhiteboardStore.getState().cleanupRemoteCursors();
-    console.log(`User left: ${userId}`);
   }
 
   private handleUsers(payload: UsersMessage): void {
@@ -276,19 +291,30 @@ class WebSocketManager {
     useWhiteboardStore.getState().setUsers(otherUsers);
   }
 
-  sendOperation(operation: Operation): void {
-    if (this.ws?.readyState === WebSocket.OPEN && this.currentUser) {
-      operation.id = operation.id || uuidv4();
-      operation.userId = this.currentUser.id;
-      crdtManager.addLocalOperation(operation);
+  private sendOrQueue(op: Operation): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(
         JSON.stringify({
           type: 'operation',
-          payload: { operation },
+          payload: { operation: op },
         })
       );
-      this.refreshOperationsFromCRDT();
+    } else {
+      this.pendingQueue.push(op);
+      console.log(`Queued operation ${op.type} (offline), queue size: ${this.pendingQueue.length}`);
     }
+  }
+
+  sendOperation(operation: Operation): void {
+    if (!this.currentUser) return;
+
+    operation.id = operation.id || uuidv4();
+    operation.userId = this.currentUser.id;
+    operation.sessionId = this.sessionId;
+    operation.lamport = 0;
+    operation.timestamp = operation.timestamp || Date.now();
+
+    this.sendOrQueue(operation);
   }
 
   sendCursor(position: Point): void {
@@ -298,6 +324,7 @@ class WebSocketManager {
           type: 'cursor',
           payload: {
             userId: this.currentUser.id,
+            sessionId: this.sessionId,
             position,
           },
         })
@@ -307,10 +334,12 @@ class WebSocketManager {
 
   sendUndo(undoOf: string): void {
     if (!this.currentUser) return;
+    if (!this.isConnected) return;
 
     const undoOp: Operation = {
       id: uuidv4(),
       userId: this.currentUser.id,
+      sessionId: this.sessionId,
       lamport: 0,
       type: 'undo',
       tool: 'pencil',
@@ -320,26 +349,17 @@ class WebSocketManager {
       undoOf,
     };
 
-    crdtManager.addLocalOperation(undoOp);
-
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          type: 'operation',
-          payload: { operation: undoOp },
-        })
-      );
-    }
-
-    this.refreshOperationsFromCRDT();
+    this.sendOrQueue(undoOp);
   }
 
   sendRedo(redoOf: string): void {
     if (!this.currentUser) return;
+    if (!this.isConnected) return;
 
     const redoOp: Operation = {
       id: uuidv4(),
       userId: this.currentUser.id,
+      sessionId: this.sessionId,
       lamport: 0,
       type: 'redo',
       tool: 'pencil',
@@ -349,26 +369,11 @@ class WebSocketManager {
       undoOf: redoOf,
     };
 
-    crdtManager.addLocalOperation(redoOp);
-
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          type: 'operation',
-          payload: { operation: redoOp },
-        })
-      );
-    }
-
-    this.refreshOperationsFromCRDT();
+    this.sendOrQueue(redoOp);
   }
 
   getIsConnected(): boolean {
     return this.isConnected;
-  }
-
-  getCurrentUser(): User | null {
-    return this.currentUser;
   }
 }
 
