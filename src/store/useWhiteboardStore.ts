@@ -41,12 +41,8 @@ interface WhiteboardState {
   setViewOffset: (offset: Point) => void;
   setViewScale: (scale: number) => void;
 
-  addOperation: (op: Operation) => void;
   setOperations: (ops: Operation[]) => void;
   setUndoRedoStacks: (undoStack: Operation[], redoStack: Operation[]) => void;
-  undo: () => Operation | null;
-  redo: () => Operation | null;
-  addToUndoStack: (op: Operation) => void;
 
   setIsConnected: (connected: boolean) => void;
 
@@ -208,53 +204,10 @@ export const useWhiteboardStore = create<WhiteboardState>((set, get) => ({
   setViewOffset: (offset) => set({ viewOffset: offset }),
   setViewScale: (scale) => set({ viewScale: scale }),
 
-  addOperation: (op) =>
-    set((state) => ({
-      operations: [...state.operations, op],
-    })),
-
   setOperations: (ops) => set({ operations: ops }),
 
   setUndoRedoStacks: (undoStack, redoStack) =>
     set({ undoStack, redoStack }),
-
-  undo: () => {
-    const state = get();
-    if (state.undoStack.length === 0) return null;
-
-    const undoOp = state.undoStack[state.undoStack.length - 1];
-    const newUndoStack = state.undoStack.slice(0, -1);
-    const newRedoStack = [...state.redoStack, undoOp];
-
-    set({
-      undoStack: newUndoStack,
-      redoStack: newRedoStack,
-    });
-
-    return undoOp;
-  },
-
-  redo: () => {
-    const state = get();
-    if (state.redoStack.length === 0) return null;
-
-    const redoOp = state.redoStack[state.redoStack.length - 1];
-    const newRedoStack = state.redoStack.slice(0, -1);
-    const newUndoStack = [...state.undoStack, redoOp];
-
-    set({
-      undoStack: newUndoStack,
-      redoStack: newRedoStack,
-    });
-
-    return redoOp;
-  },
-
-  addToUndoStack: (op) =>
-    set((state) => ({
-      undoStack: [...state.undoStack, op],
-      redoStack: [],
-    })),
 
   setIsConnected: (connected) => set({ isConnected: connected }),
 

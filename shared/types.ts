@@ -37,7 +37,9 @@ export type MessageType =
   | 'user-join'
   | 'user-leave'
   | 'users'
-  | 'sync';
+  | 'sync'
+  | 'ping'
+  | 'pong';
 
 export interface WSMessage<T = unknown> {
   type: MessageType;

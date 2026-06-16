@@ -22,31 +22,24 @@ function getWebSocketUrl(): string {
 }
 
 class WebSocketManager {
-  private static instance: WebSocketManager;
   private ws: WebSocket | null = null;
-  private reconnectTimeout: NodeJS.Timeout | null = null;
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private isManualClose = false;
   private currentUser: User | null = null;
   private isConnected = false;
   private isConnecting = false;
-  private cleanupTimer: NodeJS.Timeout | null = null;
-  private messageHandlers: Set<(message: WSMessage) => void> = new Set();
-  private initialized = false;
-
-  private constructor() {}
-
-  static getInstance(): WebSocketManager {
-    if (!WebSocketManager.instance) {
-      WebSocketManager.instance = new WebSocketManager();
-    }
-    return WebSocketManager.instance;
-  }
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastHeartbeatResponse = 0;
 
   init(): void {
-    if (this.initialized) {
+    if (this.isConnected || this.isConnecting) {
       return;
     }
-    this.initialized = true;
+    if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+      this.ws.close();
+      this.ws = null;
+    }
     this.connect();
   }
 
@@ -87,20 +80,38 @@ class WebSocketManager {
             useWhiteboardStore.getState().cleanupRemoteCursors();
           }, 5000);
         }
+
+        if (!this.heartbeatTimer) {
+          this.lastHeartbeatResponse = Date.now();
+          this.heartbeatTimer = setInterval(() => {
+            if (this.ws?.readyState === WebSocket.OPEN) {
+              if (Date.now() - this.lastHeartbeatResponse > 15000) {
+                console.log('Heartbeat timeout, reconnecting...');
+                this.forceDisconnect();
+                this.scheduleReconnect();
+                return;
+              }
+              this.ws.send(JSON.stringify({ type: 'ping' }));
+            }
+          }, 5000);
+        }
       };
 
       ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data) as WSMessage;
+          if (message.type === 'pong') {
+            this.lastHeartbeatResponse = Date.now();
+            return;
+          }
           this.handleMessage(message);
-          this.messageHandlers.forEach((handler) => handler(message));
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
         }
       };
 
-      ws.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code, event.reason);
+      ws.onclose = () => {
+        console.log('WebSocket disconnected');
         this.isConnected = false;
         this.isConnecting = false;
         this.ws = null;
@@ -122,15 +133,16 @@ class WebSocketManager {
     }
   }
 
-  disconnect(): void {
-  }
-
   forceDisconnect(): void {
     this.isManualClose = true;
     this.isConnecting = false;
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
+    }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
@@ -141,6 +153,7 @@ class WebSocketManager {
       this.ws = null;
     }
     this.isConnected = false;
+    useWhiteboardStore.getState().setIsConnected(false);
   }
 
   private scheduleReconnect(): void {
@@ -211,7 +224,7 @@ class WebSocketManager {
 
     crdtManager.clear();
     operations.forEach((op) => {
-      crdtManager.applyOperation(op);
+      crdtManager.applyOperation(op, true);
     });
 
     this.refreshOperationsFromCRDT();
@@ -221,14 +234,13 @@ class WebSocketManager {
 
   private handleOperation(payload: OperationMessage): void {
     const { operation } = payload;
-
-    if (crdtManager.hasOperation(operation.id)) {
-      return;
-    }
-
-    const applied = crdtManager.applyOperation(operation);
-    if (applied) {
+    const isMyOp = this.currentUser && operation.userId === this.currentUser.id;
+    const changed = crdtManager.confirmOperation(operation);
+    if (changed) {
       this.refreshOperationsFromCRDT();
+      if (isMyOp) {
+        console.log(`Server confirmed my operation ${operation.id}, lamport: ${operation.lamport}`);
+      }
     }
   }
 
@@ -252,6 +264,7 @@ class WebSocketManager {
   private handleUserLeave(payload: UserLeaveMessage): void {
     const { userId } = payload;
     useWhiteboardStore.getState().removeUser(userId);
+    useWhiteboardStore.getState().cleanupRemoteCursors();
     console.log(`User left: ${userId}`);
   }
 
@@ -267,7 +280,6 @@ class WebSocketManager {
     if (this.ws?.readyState === WebSocket.OPEN && this.currentUser) {
       operation.id = operation.id || uuidv4();
       operation.userId = this.currentUser.id;
-      operation.lamport = crdtManager.getLocalLamport() + 1;
       crdtManager.addLocalOperation(operation);
       this.ws.send(
         JSON.stringify({
@@ -299,7 +311,7 @@ class WebSocketManager {
     const undoOp: Operation = {
       id: uuidv4(),
       userId: this.currentUser.id,
-      lamport: crdtManager.getLocalLamport() + 1,
+      lamport: 0,
       type: 'undo',
       tool: 'pencil',
       color: '#000000',
@@ -328,7 +340,7 @@ class WebSocketManager {
     const redoOp: Operation = {
       id: uuidv4(),
       userId: this.currentUser.id,
-      lamport: crdtManager.getLocalLamport() + 1,
+      lamport: 0,
       type: 'redo',
       tool: 'pencil',
       color: '#000000',
@@ -358,38 +370,24 @@ class WebSocketManager {
   getCurrentUser(): User | null {
     return this.currentUser;
   }
+}
 
-  subscribe(handler: (message: WSMessage) => void): () => void {
-    this.messageHandlers.add(handler);
-    return () => {
-      this.messageHandlers.delete(handler);
-    };
+const WS_KEY = '__whiteboard_ws_manager';
+
+function getWSManager(): WebSocketManager {
+  if (!(window as any)[WS_KEY]) {
+    (window as any)[WS_KEY] = new WebSocketManager();
   }
+  return (window as any)[WS_KEY];
 }
 
-const wsManager = WebSocketManager.getInstance();
-
-if (typeof window !== 'undefined') {
-  wsManager.init();
-}
+const wsManager = getWSManager();
 
 export function useWebSocket() {
-  const [isConnected, setIsConnectedState] = useState(wsManager.getIsConnected());
-  const isConnectedRef = useRef(isConnected);
+  const isConnectedFromStore = useWhiteboardStore((state) => state.isConnected);
 
   useEffect(() => {
-    isConnectedRef.current = isConnected;
-  }, [isConnected]);
-
-  useEffect(() => {
-    const checkInterval = setInterval(() => {
-      const connected = wsManager.getIsConnected();
-      if (connected !== isConnectedRef.current) {
-        setIsConnectedState(connected);
-      }
-    }, 200);
-
-    return () => clearInterval(checkInterval);
+    wsManager.init();
   }, []);
 
   const sendOperation = useCallback((operation: Operation) => {
@@ -408,21 +406,11 @@ export function useWebSocket() {
     wsManager.sendRedo(redoOf);
   }, []);
 
-  const connect = useCallback(() => {
-    wsManager.connect();
-  }, []);
-
-  const disconnect = useCallback(() => {
-    wsManager.disconnect();
-  }, []);
-
   return {
-    connect,
-    disconnect,
     sendOperation,
     sendCursor,
     sendUndo,
     sendRedo,
-    isConnected,
+    isConnected: isConnectedFromStore,
   };
 }

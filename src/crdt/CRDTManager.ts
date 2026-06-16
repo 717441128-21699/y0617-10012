@@ -3,6 +3,7 @@ import type { Operation, Point } from '../../shared/types';
 export interface OperationState {
   op: Operation;
   undone: boolean;
+  confirmed: boolean;
 }
 
 export class CRDTManager {
@@ -18,11 +19,6 @@ export class CRDTManager {
     return this.localLamport;
   }
 
-  incrementLamport(): number {
-    this.localLamport++;
-    return this.localLamport;
-  }
-
   receiveLamport(remote: number): void {
     this.localLamport = Math.max(this.localLamport, remote) + 1;
   }
@@ -31,9 +27,42 @@ export class CRDTManager {
     return this.operations.has(id);
   }
 
-  applyOperation(op: Operation): boolean {
-    if (this.operations.has(op.id)) {
-      return false;
+  applyOperation(op: Operation, confirmed: boolean = false): boolean {
+    const existing = this.operations.get(op.id);
+
+    if (existing) {
+      let changed = false;
+
+      if (confirmed && !existing.confirmed) {
+        existing.confirmed = true;
+        changed = true;
+      }
+
+      if (op.lamport > existing.op.lamport) {
+        existing.op = { ...existing.op, lamport: op.lamport };
+        this.receiveLamport(op.lamport);
+        changed = true;
+      }
+
+      if (op.type === 'undo' && op.undoOf) {
+        const targetState = this.operations.get(op.undoOf);
+        if (targetState && !targetState.undone) {
+          targetState.undone = true;
+          changed = true;
+        }
+      } else if (op.type === 'redo' && op.undoOf) {
+        const targetState = this.operations.get(op.undoOf);
+        if (targetState && targetState.undone) {
+          targetState.undone = false;
+          changed = true;
+        }
+      }
+
+      if (changed && this.onOperationsChanged) {
+        this.onOperationsChanged();
+      }
+
+      return changed;
     }
 
     this.receiveLamport(op.lamport);
@@ -53,18 +82,19 @@ export class CRDTManager {
     this.operations.set(op.id, {
       op,
       undone: false,
+      confirmed,
     });
 
     if (op.type === 'draw') {
-      this.operations.forEach((state, id) => {
-        if (state.op.type === 'undo' && state.op.undoOf === op.id) {
+      this.operations.forEach((state) => {
+        if (state.op.type === 'undo' && state.op.undoOf === op.id && !op.undoOf) {
           const targetState = this.operations.get(op.id);
-          if (targetState) {
+          if (targetState && !targetState.undone) {
             targetState.undone = true;
           }
-        } else if (state.op.type === 'redo' && state.op.undoOf === op.id) {
+        } else if (state.op.type === 'redo' && state.op.undoOf === op.id && !op.undoOf) {
           const targetState = this.operations.get(op.id);
-          if (targetState) {
+          if (targetState && targetState.undone) {
             targetState.undone = false;
           }
         }
@@ -78,17 +108,17 @@ export class CRDTManager {
     return true;
   }
 
+  confirmOperation(op: Operation): boolean {
+    return this.applyOperation(op, true);
+  }
+
   getOperations(): Operation[] {
     return Array.from(this.operations.values())
       .filter((state) => state.op.type === 'draw' && !state.undone)
       .map((state) => state.op)
       .sort((a, b) => {
-        if (a.lamport !== b.lamport) {
-          return a.lamport - b.lamport;
-        }
-        if (a.timestamp !== b.timestamp) {
-          return a.timestamp - b.timestamp;
-        }
+        if (a.lamport !== b.lamport) return a.lamport - b.lamport;
+        if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
         return a.id.localeCompare(b.id);
       });
   }
@@ -109,7 +139,8 @@ export class CRDTManager {
 
     myDrawOps.sort((a, b) => {
       if (a.lamport !== b.lamport) return a.lamport - b.lamport;
-      return a.timestamp - b.timestamp;
+      if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+      return a.id.localeCompare(b.id);
     });
 
     const undoStack: Operation[] = [];
@@ -127,9 +158,9 @@ export class CRDTManager {
   }
 
   addLocalOperation(op: Operation): void {
-    this.incrementLamport();
+    this.localLamport++;
     op.lamport = this.localLamport;
-    this.applyOperation(op);
+    this.applyOperation(op, false);
   }
 
   clear(): void {
@@ -142,4 +173,13 @@ export class CRDTManager {
   }
 }
 
-export const crdtManager = new CRDTManager();
+const CRDT_KEY = '__whiteboard_crdt_manager';
+
+function getCRDTManager(): CRDTManager {
+  if (!(window as any)[CRDT_KEY]) {
+    (window as any)[CRDT_KEY] = new CRDTManager();
+  }
+  return (window as any)[CRDT_KEY];
+}
+
+export const crdtManager = getCRDTManager();

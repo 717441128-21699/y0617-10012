@@ -109,6 +109,9 @@ function handleMessage(ws: ExtendedWebSocket, message: WSMessage, wss: WebSocket
     case 'cursor':
       handleCursor(ws, message.payload as CursorMessage, wss);
       break;
+    case 'ping':
+      sendMessage(ws, 'pong', {});
+      break;
   }
 }
 
