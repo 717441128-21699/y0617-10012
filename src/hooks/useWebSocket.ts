@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { useWhiteboardStore } from '../store/useWhiteboardStore';
 import { crdtManager } from '../crdt/CRDTManager';
@@ -21,36 +21,53 @@ function getWebSocketUrl(): string {
   return `${protocol}//${host}/ws`;
 }
 
-export function useWebSocket() {
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isManualCloseRef = useRef(false);
-  const currentUserRef = useRef<User | null>(null);
+class WebSocketManager {
+  private static instance: WebSocketManager;
+  private ws: WebSocket | null = null;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
+  private isManualClose = false;
+  private currentUser: User | null = null;
+  private isConnected = false;
+  private isConnecting = false;
+  private cleanupTimer: NodeJS.Timeout | null = null;
+  private messageHandlers: Set<(message: WSMessage) => void> = new Set();
+  private initialized = false;
 
-  const setCurrentUser = useWhiteboardStore((state) => state.setCurrentUser);
-  const addUser = useWhiteboardStore((state) => state.addUser);
-  const removeUser = useWhiteboardStore((state) => state.removeUser);
-  const setUsers = useWhiteboardStore((state) => state.setUsers);
-  const updateRemoteCursor = useWhiteboardStore((state) => state.updateRemoteCursor);
-  const setIsConnected = useWhiteboardStore((state) => state.setIsConnected);
-  const setOperations = useWhiteboardStore((state) => state.setOperations);
-  const setUndoRedoStacks = useWhiteboardStore((state) => state.setUndoRedoStacks);
+  private constructor() {}
 
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+  static getInstance(): WebSocketManager {
+    if (!WebSocketManager.instance) {
+      WebSocketManager.instance = new WebSocketManager();
+    }
+    return WebSocketManager.instance;
+  }
+
+  init(): void {
+    if (this.initialized) {
+      return;
+    }
+    this.initialized = true;
+    this.connect();
+  }
+
+  connect(): void {
+    if (this.ws?.readyState === WebSocket.OPEN || this.isConnected || this.isConnecting) {
       return;
     }
 
-    isManualCloseRef.current = false;
+    this.isManualClose = false;
+    this.isConnecting = true;
 
     try {
       const wsUrl = getWebSocketUrl();
       const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+      this.ws = ws;
 
       ws.onopen = () => {
         console.log('WebSocket connected to', wsUrl);
-        setIsConnected(true);
+        this.isConnected = true;
+        this.isConnecting = false;
+        useWhiteboardStore.getState().setIsConnected(true);
 
         const storedUserId = localStorage.getItem('whiteboard_user_id');
         const storedUserName = localStorage.getItem('whiteboard_user_name');
@@ -64,12 +81,19 @@ export function useWebSocket() {
             },
           })
         );
+
+        if (!this.cleanupTimer) {
+          this.cleanupTimer = setInterval(() => {
+            useWhiteboardStore.getState().cleanupRemoteCursors();
+          }, 5000);
+        }
       };
 
       ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data) as WSMessage;
-          handleMessage(message);
+          this.handleMessage(message);
+          this.messageHandlers.forEach((handler) => handler(message));
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
         }
@@ -77,209 +101,204 @@ export function useWebSocket() {
 
       ws.onclose = (event) => {
         console.log('WebSocket disconnected:', event.code, event.reason);
-        setIsConnected(false);
+        this.isConnected = false;
+        this.isConnecting = false;
+        this.ws = null;
+        useWhiteboardStore.getState().setIsConnected(false);
 
-        if (!isManualCloseRef.current) {
-          scheduleReconnect();
+        if (!this.isManualClose) {
+          this.scheduleReconnect();
         }
       };
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
+        this.isConnecting = false;
       };
     } catch (error) {
       console.error('Error creating WebSocket:', error);
-      scheduleReconnect();
+      this.isConnecting = false;
+      this.scheduleReconnect();
     }
-  }, [setIsConnected]);
+  }
 
-  const disconnect = useCallback(() => {
-    isManualCloseRef.current = true;
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-  }, []);
+  disconnect(): void {
+  }
 
-  const scheduleReconnect = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
+  forceDisconnect(): void {
+    this.isManualClose = true;
+    this.isConnecting = false;
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
     }
-    reconnectTimeoutRef.current = setTimeout(() => {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.isConnected = false;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+    }
+    this.reconnectTimeout = setTimeout(() => {
       console.log('Attempting to reconnect...');
-      connect();
+      this.connect();
     }, 3000);
-  }, [connect]);
+  }
 
-  const refreshOperationsFromCRDT = useCallback(() => {
-    setOperations(crdtManager.getOperations());
-    if (currentUserRef.current) {
-      const { undoStack, redoStack } = crdtManager.getMyUndoRedoStacks(currentUserRef.current.id);
-      setUndoRedoStacks(undoStack, redoStack);
+  private refreshOperationsFromCRDT(): void {
+    const ops = crdtManager.getOperations();
+    useWhiteboardStore.getState().setOperations(ops);
+    if (this.currentUser) {
+      const { undoStack, redoStack } = crdtManager.getMyUndoRedoStacks(this.currentUser.id);
+      useWhiteboardStore.getState().setUndoRedoStacks(undoStack, redoStack);
     }
-  }, [setOperations, setUndoRedoStacks]);
+  }
 
-  const handleMessage = useCallback(
-    (message: WSMessage) => {
-      switch (message.type) {
-        case 'history': {
-          const payload = message.payload as HistoryMessage & { currentUser: User };
-          handleHistory(payload);
-          break;
-        }
-        case 'operation': {
-          const payload = message.payload as OperationMessage;
-          handleOperation(payload);
-          break;
-        }
-        case 'cursor': {
-          const payload = message.payload as CursorMessage;
-          handleCursor(payload);
-          break;
-        }
-        case 'user-join': {
-          const payload = message.payload as UserJoinMessage;
-          handleUserJoin(payload);
-          break;
-        }
-        case 'user-leave': {
-          const payload = message.payload as UserLeaveMessage;
-          handleUserLeave(payload);
-          break;
-        }
-        case 'users': {
-          const payload = message.payload as UsersMessage;
-          handleUsers(payload);
-          break;
-        }
+  private handleMessage(message: WSMessage): void {
+    switch (message.type) {
+      case 'history': {
+        const payload = message.payload as HistoryMessage & { currentUser: User };
+        this.handleHistory(payload);
+        break;
       }
-    },
-    []
-  );
-
-  const handleHistory = useCallback(
-    (payload: HistoryMessage & { currentUser: User }) => {
-      const { operations, users, currentUser } = payload;
-
-      localStorage.setItem('whiteboard_user_id', currentUser.id);
-      localStorage.setItem('whiteboard_user_name', currentUser.name);
-
-      currentUserRef.current = currentUser;
-      setCurrentUser(currentUser);
-
-      const otherUsers = users.filter((u) => u.id !== currentUser.id);
-      setUsers(otherUsers);
-
-      crdtManager.clear();
-      operations.forEach((op) => {
-        crdtManager.applyOperation(op);
-      });
-
-      refreshOperationsFromCRDT();
-
-      console.log(`Loaded ${operations.length} operations from history for user ${currentUser.name}`);
-    },
-    [setCurrentUser, setUsers, refreshOperationsFromCRDT]
-  );
-
-  const handleOperation = useCallback(
-    (payload: OperationMessage) => {
-      const { operation } = payload;
-
-      if (crdtManager.hasOperation(operation.id)) {
-        return;
+      case 'operation': {
+        const payload = message.payload as OperationMessage;
+        this.handleOperation(payload);
+        break;
       }
-
-      const applied = crdtManager.applyOperation(operation);
-      if (applied) {
-        refreshOperationsFromCRDT();
+      case 'cursor': {
+        const payload = message.payload as CursorMessage;
+        this.handleCursor(payload);
+        break;
       }
-    },
-    [refreshOperationsFromCRDT]
-  );
-
-  const handleCursor = useCallback(
-    (payload: CursorMessage) => {
-      const { userId, position } = payload;
-      if (currentUserRef.current && userId === currentUserRef.current.id) {
-        return;
+      case 'user-join': {
+        const payload = message.payload as UserJoinMessage;
+        this.handleUserJoin(payload);
+        break;
       }
-      updateRemoteCursor(userId, position);
-    },
-    [updateRemoteCursor]
-  );
-
-  const handleUserJoin = useCallback(
-    (payload: UserJoinMessage) => {
-      const { user } = payload;
-      if (currentUserRef.current && user.id === currentUserRef.current.id) {
-        return;
+      case 'user-leave': {
+        const payload = message.payload as UserLeaveMessage;
+        this.handleUserLeave(payload);
+        break;
       }
-      addUser(user);
-      console.log(`User joined: ${user.name}`);
-    },
-    [addUser]
-  );
+      case 'users': {
+        const payload = message.payload as UsersMessage;
+        this.handleUsers(payload);
+        break;
+      }
+    }
+  }
 
-  const handleUserLeave = useCallback(
-    (payload: UserLeaveMessage) => {
-      const { userId } = payload;
-      removeUser(userId);
-      console.log(`User left: ${userId}`);
-    },
-    [removeUser]
-  );
+  private handleHistory(payload: HistoryMessage & { currentUser: User }): void {
+    const { operations, users, currentUser } = payload;
 
-  const handleUsers = useCallback(
-    (payload: UsersMessage) => {
-      const { users } = payload;
-      const otherUsers = currentUserRef.current
-        ? users.filter((u) => u.id !== currentUserRef.current.id)
-        : users;
-      setUsers(otherUsers);
-    },
-    [setUsers]
-  );
+    localStorage.setItem('whiteboard_user_id', currentUser.id);
+    localStorage.setItem('whiteboard_user_name', currentUser.name);
 
-  const sendOperation = useCallback((operation: Operation) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    this.currentUser = currentUser;
+    useWhiteboardStore.getState().setCurrentUser(currentUser);
+
+    const otherUsers = users.filter((u) => u.id !== currentUser.id);
+    useWhiteboardStore.getState().setUsers(otherUsers);
+
+    crdtManager.clear();
+    operations.forEach((op) => {
+      crdtManager.applyOperation(op);
+    });
+
+    this.refreshOperationsFromCRDT();
+
+    console.log(`Loaded ${operations.length} operations from history for user ${currentUser.name}`);
+  }
+
+  private handleOperation(payload: OperationMessage): void {
+    const { operation } = payload;
+
+    if (crdtManager.hasOperation(operation.id)) {
+      return;
+    }
+
+    const applied = crdtManager.applyOperation(operation);
+    if (applied) {
+      this.refreshOperationsFromCRDT();
+    }
+  }
+
+  private handleCursor(payload: CursorMessage): void {
+    const { userId, position } = payload;
+    if (this.currentUser && userId === this.currentUser.id) {
+      return;
+    }
+    useWhiteboardStore.getState().updateRemoteCursor(userId, position);
+  }
+
+  private handleUserJoin(payload: UserJoinMessage): void {
+    const { user } = payload;
+    if (this.currentUser && user.id === this.currentUser.id) {
+      return;
+    }
+    useWhiteboardStore.getState().addUser(user);
+    console.log(`User joined: ${user.name}`);
+  }
+
+  private handleUserLeave(payload: UserLeaveMessage): void {
+    const { userId } = payload;
+    useWhiteboardStore.getState().removeUser(userId);
+    console.log(`User left: ${userId}`);
+  }
+
+  private handleUsers(payload: UsersMessage): void {
+    const { users } = payload;
+    const otherUsers = this.currentUser
+      ? users.filter((u) => u.id !== this.currentUser.id)
+      : users;
+    useWhiteboardStore.getState().setUsers(otherUsers);
+  }
+
+  sendOperation(operation: Operation): void {
+    if (this.ws?.readyState === WebSocket.OPEN && this.currentUser) {
       operation.id = operation.id || uuidv4();
+      operation.userId = this.currentUser.id;
       operation.lamport = crdtManager.getLocalLamport() + 1;
       crdtManager.addLocalOperation(operation);
-      wsRef.current.send(
+      this.ws.send(
         JSON.stringify({
           type: 'operation',
           payload: { operation },
         })
       );
-      refreshOperationsFromCRDT();
+      this.refreshOperationsFromCRDT();
     }
-  }, [refreshOperationsFromCRDT]);
+  }
 
-  const sendCursor = useCallback((position: Point) => {
-    if (currentUserRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
+  sendCursor(position: Point): void {
+    if (this.currentUser && this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(
         JSON.stringify({
           type: 'cursor',
           payload: {
-            userId: currentUserRef.current.id,
+            userId: this.currentUser.id,
             position,
           },
         })
       );
     }
-  }, []);
+  }
 
-  const sendUndo = useCallback((undoOf: string) => {
-    if (!currentUserRef.current) return;
+  sendUndo(undoOf: string): void {
+    if (!this.currentUser) return;
 
     const undoOp: Operation = {
       id: uuidv4(),
-      userId: currentUserRef.current.id,
+      userId: this.currentUser.id,
       lamport: crdtManager.getLocalLamport() + 1,
       type: 'undo',
       tool: 'pencil',
@@ -291,8 +310,8 @@ export function useWebSocket() {
 
     crdtManager.addLocalOperation(undoOp);
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(
         JSON.stringify({
           type: 'operation',
           payload: { operation: undoOp },
@@ -300,15 +319,15 @@ export function useWebSocket() {
       );
     }
 
-    refreshOperationsFromCRDT();
-  }, [refreshOperationsFromCRDT]);
+    this.refreshOperationsFromCRDT();
+  }
 
-  const sendRedo = useCallback((redoOf: string) => {
-    if (!currentUserRef.current) return;
+  sendRedo(redoOf: string): void {
+    if (!this.currentUser) return;
 
     const redoOp: Operation = {
       id: uuidv4(),
-      userId: currentUserRef.current.id,
+      userId: this.currentUser.id,
       lamport: crdtManager.getLocalLamport() + 1,
       type: 'redo',
       tool: 'pencil',
@@ -320,8 +339,8 @@ export function useWebSocket() {
 
     crdtManager.addLocalOperation(redoOp);
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(
         JSON.stringify({
           type: 'operation',
           payload: { operation: redoOp },
@@ -329,18 +348,73 @@ export function useWebSocket() {
       );
     }
 
-    refreshOperationsFromCRDT();
-  }, [refreshOperationsFromCRDT]);
+    this.refreshOperationsFromCRDT();
+  }
+
+  getIsConnected(): boolean {
+    return this.isConnected;
+  }
+
+  getCurrentUser(): User | null {
+    return this.currentUser;
+  }
+
+  subscribe(handler: (message: WSMessage) => void): () => void {
+    this.messageHandlers.add(handler);
+    return () => {
+      this.messageHandlers.delete(handler);
+    };
+  }
+}
+
+const wsManager = WebSocketManager.getInstance();
+
+if (typeof window !== 'undefined') {
+  wsManager.init();
+}
+
+export function useWebSocket() {
+  const [isConnected, setIsConnectedState] = useState(wsManager.getIsConnected());
+  const isConnectedRef = useRef(isConnected);
 
   useEffect(() => {
-    connect();
+    isConnectedRef.current = isConnected;
+  }, [isConnected]);
 
-    return () => {
-      disconnect();
-    };
-  }, [connect, disconnect]);
+  useEffect(() => {
+    const checkInterval = setInterval(() => {
+      const connected = wsManager.getIsConnected();
+      if (connected !== isConnectedRef.current) {
+        setIsConnectedState(connected);
+      }
+    }, 200);
 
-  const isConnected = useWhiteboardStore((state) => state.isConnected);
+    return () => clearInterval(checkInterval);
+  }, []);
+
+  const sendOperation = useCallback((operation: Operation) => {
+    wsManager.sendOperation(operation);
+  }, []);
+
+  const sendCursor = useCallback((position: Point) => {
+    wsManager.sendCursor(position);
+  }, []);
+
+  const sendUndo = useCallback((undoOf: string) => {
+    wsManager.sendUndo(undoOf);
+  }, []);
+
+  const sendRedo = useCallback((redoOf: string) => {
+    wsManager.sendRedo(redoOf);
+  }, []);
+
+  const connect = useCallback(() => {
+    wsManager.connect();
+  }, []);
+
+  const disconnect = useCallback(() => {
+    wsManager.disconnect();
+  }, []);
 
   return {
     connect,

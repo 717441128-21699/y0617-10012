@@ -234,13 +234,15 @@ export const Canvas: React.FC<CanvasProps> = ({ className }) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
         if (e.shiftKey) {
-          const redoOp = useWhiteboardStore.getState().redo();
-          if (redoOp) {
+          const state = useWhiteboardStore.getState();
+          if (state.redoStack.length > 0) {
+            const redoOp = state.redoStack[state.redoStack.length - 1];
             sendRedo(redoOp.id);
           }
         } else {
-          const undoOp = useWhiteboardStore.getState().undo();
-          if (undoOp) {
+          const state = useWhiteboardStore.getState();
+          if (state.undoStack.length > 0) {
+            const undoOp = state.undoStack[state.undoStack.length - 1];
             sendUndo(undoOp.id);
           }
         }

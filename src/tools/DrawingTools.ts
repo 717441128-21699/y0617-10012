@@ -260,7 +260,11 @@ export class DrawingTools {
     this.clear(width, height);
     this.drawGrid(width, height, offset, scale);
 
-    const sortedOps = [...operations].sort((a, b) => a.lamport - b.lamport);
+    const sortedOps = [...operations].sort((a, b) => {
+      if (a.lamport !== b.lamport) return a.lamport - b.lamport;
+      if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+      return a.id.localeCompare(b.id);
+    });
 
     for (const op of sortedOps) {
       this.drawOperation(op, offset, scale);

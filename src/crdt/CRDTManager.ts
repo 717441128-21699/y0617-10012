@@ -55,6 +55,22 @@ export class CRDTManager {
       undone: false,
     });
 
+    if (op.type === 'draw') {
+      this.operations.forEach((state, id) => {
+        if (state.op.type === 'undo' && state.op.undoOf === op.id) {
+          const targetState = this.operations.get(op.id);
+          if (targetState) {
+            targetState.undone = true;
+          }
+        } else if (state.op.type === 'redo' && state.op.undoOf === op.id) {
+          const targetState = this.operations.get(op.id);
+          if (targetState) {
+            targetState.undone = false;
+          }
+        }
+      });
+    }
+
     if (this.onOperationsChanged) {
       this.onOperationsChanged();
     }

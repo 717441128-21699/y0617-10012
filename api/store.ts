@@ -21,7 +21,15 @@ class Store {
   getOperations(): Operation[] {
     return this.operationOrder
       .map(id => this.operations.get(id)!)
-      .sort((a, b) => a.lamport - b.lamport);
+      .sort((a, b) => {
+        if (a.lamport !== b.lamport) {
+          return a.lamport - b.lamport;
+        }
+        if (a.timestamp !== b.timestamp) {
+          return a.timestamp - b.timestamp;
+        }
+        return a.id.localeCompare(b.id);
+      });
   }
 
   getMaxLamport(): number {

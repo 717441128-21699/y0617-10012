@@ -40,22 +40,20 @@ export const Toolbar: React.FC = () => {
     setCurrentLineWidth,
     setViewScale,
     setViewOffset,
-    undo,
-    redo,
   } = useWhiteboardStore();
 
   const { sendUndo, sendRedo, isConnected } = useWebSocket();
 
   const handleUndo = () => {
-    const undoOp = undo();
-    if (undoOp) {
+    if (undoStack.length > 0) {
+      const undoOp = undoStack[undoStack.length - 1];
       sendUndo(undoOp.id);
     }
   };
 
   const handleRedo = () => {
-    const redoOp = redo();
-    if (redoOp) {
+    if (redoStack.length > 0) {
+      const redoOp = redoStack[redoStack.length - 1];
       sendRedo(redoOp.id);
     }
   };
